@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import MerchantDashboard from "./components/MerchantDashboard";
+
 
 const API_URL =
   process.env.NEXT_PUBLIC_API_URL ||
@@ -660,7 +662,7 @@ export default function Home() {
         },
 
         theme: {
-          color: "#2563eb",
+          color: "#176B50",
         },
 
         handler: async (
@@ -1133,6 +1135,17 @@ export default function Home() {
         </div>
       </header>
 
+      <MerchantDashboard
+        darkMode={darkMode}
+        onOpenAgent={() => setAgentOpen(true)}
+        onViewOrders={() => {
+          setAgentOpen(true);
+          setMessage("Show my orders");
+          setTimeout(() => sendAgentMessage("Show my orders"), 100);
+        }}
+      />
+
+
       {/* CATEGORY BAR */}
 
       <nav className="border-b border-[var(--border)] bg-[var(--surface)]">
@@ -1451,20 +1464,20 @@ export default function Home() {
                                     <div className="flex h-20 w-20 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-[var(--product-bg)]">
 
                                       {product.image_url ? (
-                                        <img
-                                          src={
-                                            product.image_url
-                                          }
-                                          alt={
-                                            product.name
-                                          }
-                                          className="h-full w-full object-contain p-2"
-                                        />
-                                      ) : (
-                                        <span className="text-3xl">
-                                          🛍️
-                                        </span>
-                                      )}
+  <img
+    src={product.image_url}
+    alt={product.name}
+    className="h-full w-full object-contain p-5 transition duration-500 hover:scale-110"
+    loading="lazy"
+    onError={(e) => {
+      e.currentTarget.style.display = "none";
+    }}
+  />
+) : (
+  <div className="flex h-full w-full items-center justify-center">
+    <span className="text-6xl">🛍️</span>
+  </div>
+)}
 
                                     </div>
 
@@ -1641,9 +1654,7 @@ export default function Home() {
 </button>
 
                 <button
-                  onClick={
-                    sendAgentMessage
-                  }
+                  onClick={() => sendAgentMessage()}
                   disabled={
                     agentLoading ||
                     !message.trim()
@@ -1955,17 +1966,20 @@ function ProductGrid({
 
                 {product.image_url ? (
                   <img
-                    src={
-                      product.image_url
-                    }
-                    alt={
-                      product.name
-                    }
-                    className="h-full w-full object-contain p-5 transition duration-300 hover:scale-105"
+                    src={product.image_url}
+                    alt={product.name}
+                    className="h-full w-full object-contain p-5 transition duration-500 hover:scale-110"
+                    loading="lazy"
+                    onError={(e) => {
+                      e.currentTarget.style.display = "none";
+                      e.currentTarget.parentElement?.classList.add(
+                        "product-image-fallback",
+                      );
+                    }}
                   />
                 ) : (
-                  <div className="text-7xl">
-                    🛍️
+                  <div className="product-image-fallback flex h-full w-full items-center justify-center">
+                    <span className="text-6xl">🛍️</span>
                   </div>
                 )}
 

@@ -18,6 +18,137 @@ from app.services.product_search import search_catalog
 
 
 # ============================================================
+# CAMPAIGN ORCHESTRATOR
+# ============================================================
+#
+# Track 01:
+# Proposes bounded merchant campaigns from real store data.
+#
+# IMPORTANT:
+# This function only proposes a campaign.
+# It does NOT apply discounts or perform money actions.
+# Merchant confirmation is required before execution.
+# ============================================================
+
+def get_campaign_proposal(
+    db: Session,
+    session_id: str,
+):
+    paid_orders = db.scalars(
+        select(Order)
+        .where(
+            Order.payment_status == "paid"
+        )
+        .options(
+            selectinload(Order.items)
+        )
+        .order_by(
+            Order.created_at.desc()
+        )
+        .limit(50)
+    ).all()
+
+    if not paid_orders:
+        proposal = {
+            "campaign_type": "growth",
+            "title": "Start with your best-selling products",
+            "reason": "There is not enough paid-order history yet to identify a strong campaign target.",
+            "offer": "No automatic discount proposed",
+            "target": "Best-selling products",
+            "bounded_action": "Merchant review required",
+        }
+
+        log_agent_action(
+            db,
+            session_id,
+            "CAMPAIGN_PROPOSED",
+            json.dumps(proposal),
+        )
+
+        return proposal
+
+    product_sales: dict[int, int] = {}
+
+    for order in paid_orders:
+        for item in order.items:
+            product_sales[item.variant_id] = (
+                product_sales.get(item.variant_id, 0)
+                + item.quantity
+            )
+
+    if not product_sales:
+        proposal = {
+            "campaign_type": "growth",
+            "title": "Grow basket size",
+            "reason": "Paid orders exist, but product-level sales data is not available for targeting.",
+            "offer": "No automatic discount proposed",
+            "target": "Existing customers",
+            "bounded_action": "Merchant review required",
+        }
+
+        log_agent_action(
+            db,
+            session_id,
+            "CAMPAIGN_PROPOSED",
+            json.dumps(proposal),
+        )
+
+        return proposal
+
+    best_variant_id = max(
+        product_sales,
+        key=product_sales.get,
+    )
+
+    variant = db.scalar(
+        select(ProductVariant)
+        .where(
+            ProductVariant.id == best_variant_id
+        )
+        .options(
+            selectinload(ProductVariant.product)
+        )
+    )
+
+    if variant is None:
+        proposal = {
+            "campaign_type": "cross_sell",
+            "title": "Increase basket size",
+            "reason": "A strong-selling product was identified, but its product details could not be loaded.",
+            "offer": "Up to 10% discount, merchant approval required",
+            "target": "Customers buying popular products",
+            "bounded_action": "No campaign will run automatically",
+        }
+    else:
+        product = variant.product
+
+        proposal = {
+            "campaign_type": "cross_sell",
+            "title": f"Increase sales around {product.name}",
+            "reason": (
+                f"{product.name} is currently the strongest product "
+                f"signal from the latest {len(paid_orders)} paid order(s), "
+                f"with {product_sales[best_variant_id]} unit(s) sold."
+            ),
+            "offer": "Bundle or complementary-product offer, capped at 10%",
+            "target": product.name,
+            "bounded_action": (
+                "Proposal only — merchant confirmation is required "
+                "before any campaign or discount is applied."
+            ),
+        }
+
+    log_agent_action(
+        db,
+        session_id,
+        "CAMPAIGN_PROPOSED",
+        json.dumps(proposal),
+    )
+
+    return proposal
+
+
+# ============================================================
 # GEMINI CLIENT
 # ============================================================
 
@@ -1247,6 +1378,39 @@ def chat_with_agent(
     # HARD RECOMMENDATION DETECTION
     # ========================================================
 
+    campaign_phrases = [
+        "create a campaign",
+        "create campaign",
+        "start a campaign",
+        "launch a campaign",
+        "make a campaign",
+        "run a campaign",
+        "campaign to grow sales",
+        "campaign to increase sales",
+        "grow my sales",
+        "grow sales",
+        "increase my sales",
+        "increase sales",
+        "boost my sales",
+        "boost sales",
+        "sales campaign",
+        "marketing campaign",
+        "campaign bana",
+        "campaign banao",
+        "campaign chalao",
+        "sales badhao",
+        "sale badhao",
+        "revenue campaign",
+    ]
+
+    if any(
+        phrase in message_lower
+        for phrase in campaign_phrases
+    ):
+        campaign_detected = True
+    else:
+        campaign_detected = False
+
     recommendation_phrases = [
         "what else should i buy",
         "what else can i buy",
@@ -1482,6 +1646,9 @@ def chat_with_agent(
 
     intent = intent_data.intent
 
+    if campaign_detected:
+        intent = "campaign"
+
     # ========================================================
     # CONVERSATION
     # ========================================================
@@ -1526,6 +1693,33 @@ def chat_with_agent(
     # ========================================================
     # RECOMMEND
     # ========================================================
+
+    if intent == "campaign":
+        proposal = get_campaign_proposal(
+            db=db,
+            session_id=session_id,
+        )
+
+        campaign_message = (
+            "📈 AI Campaign Proposal\n\n"
+            f"Campaign: {proposal['title']}\n"
+            f"Type: {proposal['campaign_type'].replace('_', ' ').title()}\n"
+            f"Target: {proposal['target']}\n"
+            f"Why: {proposal['reason']}\n"
+            f"Offer: {proposal['offer']}\n\n"
+            f"🔒 {proposal['bounded_action']}"
+        )
+
+        save_conversation_context(
+            session_id=session_id,
+            intent="campaign",
+        )
+
+        return (
+            campaign_message,
+            [],
+            "campaign",
+        )
 
     if intent == "recommend":
 

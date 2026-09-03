@@ -186,3 +186,49 @@ def create_order(
     )
 
     return order
+
+@router.get(
+    "/history/{session_id}",
+    response_model=list[OrderResponse],
+)
+def get_order_history(
+    session_id: str,
+    db: Session = Depends(get_db),
+):
+    orders = db.scalars(
+        select(Order)
+        .options(
+            selectinload(Order.items)
+        )
+        .where(
+            Order.session_id == session_id
+        )
+        .order_by(
+            Order.created_at.desc()
+        )
+    ).all()
+
+    return orders
+
+@router.get(
+    "/history/{session_id}",
+    response_model=list[OrderResponse],
+)
+def get_order_history(
+    session_id: str,
+    db: Session = Depends(get_db),
+):
+    orders = db.scalars(
+        select(Order)
+        .options(
+            selectinload(Order.items)
+        )
+        .where(
+            Order.session_id == session_id
+        )
+        .order_by(
+            Order.created_at.desc()
+        )
+    ).all()
+
+    return orders

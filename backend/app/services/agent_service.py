@@ -11,6 +11,8 @@ from app.models.cart import Cart
 from app.models.cart_item import CartItem
 from app.models.product import Product
 from app.models.product_variant import ProductVariant
+from app.models.order import Order
+from app.models.audit_log import AuditLog
 from app.schemas.agent import AgentProduct, AgentIntent
 from app.services.product_search import search_catalog
 
@@ -530,6 +532,32 @@ def fallback_understand_request(
         quantity=1,
     )
 
+def log_agent_action(
+    db,
+    session_id: str,
+    action: str,
+    details: str | None = None,
+    order_id: int | None = None,
+):
+    log = AuditLog(
+        session_id=session_id,
+        action=action,
+        details=details,
+        order_id=order_id,
+    )
+
+    db.add(log)
+    db.commit()
+
+def get_order_history(db, session_id: str):
+    orders = (
+        db.query(Order)
+        .filter(Order.session_id == session_id)
+        .order_by(Order.created_at.desc())
+        .all()
+    )
+
+    return orders
 
 # ============================================================
 # GEMINI INTENT UNDERSTANDING
@@ -917,6 +945,14 @@ def add_product_to_cart(
         db.add(cart_item)
 
     db.commit()
+    log_agent_action(
+        db,
+        session_id,
+        "ADD_TO_CART",
+        f"Added {product.name} x{requested_quantity}",
+    )
+
+    
 
     return (
         True,
@@ -1151,22 +1187,64 @@ def chat_with_agent(
     session_id: str,
 ):
 
-    message_lower = (
-        message.lower().strip()
-    )
+    message_lower = message.lower().strip()
+
+        # ORDER HISTORY / ORDER STATUS
+    order_phrases = [
+        "show my orders",
+        "show orders",
+        "my orders",
+        "order history",
+        "previous orders",
+        "past orders",
+        "mera order",
+        "mere orders",
+        "order dikhao",
+        "orders dikhao",
+        "pichle order",
+        "pichle orders",
+        "last order",
+        "latest order",
+    ]
+
+    if any(phrase in message_lower for phrase in order_phrases):
+        orders = get_order_history(db, session_id)
+
+        log_agent_action(
+            db,
+            session_id,
+            "ORDER_HISTORY_VIEWED",
+            f"Viewed {len(orders)} order(s)",
+        )
+
+        if not orders:
+            return (
+                "You don't have any previous orders yet. 📦",
+                [],
+                "order_history",
+            )
+
+        latest = orders[0]
+
+        order_lines = []
+
+        for order in orders[:5]:
+            order_lines.append(
+                f"Order #{order.id} — "
+                f"{order.status.replace('_', ' ').title()} — "
+                f"₹{float(order.subtotal):.2f}"
+            )
+
+        return (
+            "Here are your recent orders:\n\n"
+            + "\n".join(order_lines)
+            + f"\n\nYour latest order is #{latest.id}. 📦",
+            [],
+            "order_history",
+        )
 
     # ========================================================
     # HARD RECOMMENDATION DETECTION
-    # ========================================================
-    #
-    # This MUST happen before Gemini.
-    #
-    # Why?
-    # Gemini can interpret:
-    # "what else should I buy?"
-    # as add_to_cart/conversation.
-    #
-    # Deterministic detection makes the demo reliable.
     # ========================================================
 
     recommendation_phrases = [
@@ -1217,9 +1295,7 @@ def chat_with_agent(
             save_conversation_context(
                 session_id=session_id,
                 products=recommended_products,
-                recommendation=(
-                    recommended_products[0].name
-                ),
+                recommendation=recommended_products[0].name,
                 intent="recommend",
             )
 
@@ -1231,16 +1307,6 @@ def chat_with_agent(
 
     # ========================================================
     # CONTEXTUAL ADD CONFIRMATION
-    # ========================================================
-    #
-    # Handles:
-    # add
-    # yes
-    # add it
-    # add that
-    # haan add karo
-    #
-    # after a recommendation.
     # ========================================================
 
     context = get_conversation_context(
@@ -1270,17 +1336,12 @@ def chat_with_agent(
     }
 
     if (
-        message_lower
-        in confirmation_phrases
-        and context.get(
-            "last_recommendation"
-        )
+        message_lower in confirmation_phrases
+        and context.get("last_recommendation")
     ):
 
         recommended_name = (
-            context[
-                "last_recommendation"
-            ]
+            context["last_recommendation"]
         )
 
         (
@@ -1313,6 +1374,101 @@ def chat_with_agent(
             [],
             "add_to_cart",
         )
+
+    # ========================================================
+    # DIFFERENT SHOE OPTIONS
+    # ========================================================
+    #
+    # Handles:
+    # "show me different"
+    # "show me different shoes"
+    # "mujhe different shoes dikhao"
+    # "5000 ke under different shoes"
+    # "mujhe 5000 ke under shoes chahiye show me different"
+    # ========================================================
+
+    shoe_words = [
+        "shoe",
+        "shoes",
+        "sneaker",
+        "sneakers",
+        "jutta",
+        "jute",
+    ]
+
+    different_words = [
+        "different",
+        "different ones",
+        "different options",
+        "more options",
+        "other options",
+        "show me more",
+        "show different",
+        "dikhao",
+        "dikha do",
+        "alag",
+        "aur shoes",
+    ]
+
+    if (
+    any(word in message_lower for word in shoe_words)
+    and (
+        any(phrase in message_lower for phrase in different_words)
+        or "ke under" in message_lower
+        or "under" in message_lower
+        or "chahiye" in message_lower
+        or "chahie" in message_lower
+        or "dikhao" in message_lower
+        or "dikha do" in message_lower
+    )
+):
+
+        import re
+
+        max_price = None
+
+        price_match = re.search(
+            r"(?:under|below|less than|within|ke under|tak|upto|up to)"
+            r"\s*[₹rs.]?\s*(\d+(?:,\d+)*)",
+            message_lower,
+        )
+
+        if price_match:
+
+            max_price = Decimal(
+                price_match.group(1).replace(",", "")
+            )
+
+        products = search_catalog(
+            db=db,
+            search_terms=[
+                "shoes",
+                "sneakers",
+            ],
+            max_price=max_price,
+            limit=10,
+        )
+
+        agent_products = (
+            convert_to_agent_products(
+                products
+            )
+        )
+
+        if agent_products:
+
+            save_conversation_context(
+                session_id=session_id,
+                products=agent_products,
+                intent="search",
+            )
+
+            return (
+                f"I found {len(agent_products)} "
+                "different shoe options for you. 👟",
+                agent_products,
+                "search",
+            )
 
     # ========================================================
     # GEMINI / FALLBACK
@@ -1355,7 +1511,8 @@ def chat_with_agent(
         if "thank" in message_lower:
 
             return (
-                "You're welcome! 😊 Let me know if you need anything else.",
+                "You're welcome! 😊 "
+                "Let me know if you need anything else.",
                 [],
                 "conversation",
             )
@@ -1385,9 +1542,7 @@ def chat_with_agent(
             save_conversation_context(
                 session_id=session_id,
                 products=recommended_products,
-                recommendation=(
-                    recommended_products[0].name
-                ),
+                recommendation=recommended_products[0].name,
                 intent="recommend",
             )
 
@@ -1413,8 +1568,7 @@ def chat_with_agent(
                 )
             )
             .where(
-                Cart.session_id
-                == session_id
+                Cart.session_id == session_id
             )
         )
 
@@ -1437,9 +1591,7 @@ def chat_with_agent(
             if not item.variant:
                 continue
 
-            product = (
-                item.variant.product
-            )
+            product = item.variant.product
 
             if not product:
                 continue
@@ -1508,9 +1660,8 @@ def chat_with_agent(
                 )
 
                 if added:
-                    added_names.append(
-                        name
-                    )
+
+                    added_names.append(name)
 
             if added_names:
 
@@ -1530,7 +1681,8 @@ def chat_with_agent(
                 )
 
             return (
-                "I couldn't add those products to your cart.",
+                "I couldn't add those products "
+                "to your cart.",
                 [],
                 "add_to_cart",
             )
@@ -1538,7 +1690,8 @@ def chat_with_agent(
         if not product_name:
 
             return (
-                "Which product would you like me to add to your cart?",
+                "Which product would you like "
+                "me to add to your cart?",
                 [],
                 "add_to_cart",
             )
@@ -1588,7 +1741,8 @@ def chat_with_agent(
         if not product_name:
 
             return (
-                "Which product would you like me to remove?",
+                "Which product would you like "
+                "me to remove?",
                 [],
                 "remove_from_cart",
             )
@@ -1615,7 +1769,8 @@ def chat_with_agent(
         db.commit()
 
         return (
-            f"{removed_name} was removed from your cart. 🗑️",
+            f"{removed_name} was removed "
+            "from your cart. 🗑️",
             [],
             "remove_from_cart",
         )
@@ -1650,7 +1805,8 @@ def chat_with_agent(
         if not product_name:
 
             return (
-                "Which product's quantity should I update?",
+                "Which product's quantity "
+                "should I update?",
                 [],
                 "update_quantity",
             )
@@ -1677,19 +1833,16 @@ def chat_with_agent(
                 "update_quantity",
             )
 
-        inventory = (
-            item.variant.inventory
-        )
+        inventory = item.variant.inventory
 
         if (
             inventory
-            and quantity
-            > inventory.quantity
+            and quantity > inventory.quantity
         ):
 
             return (
                 f"Only {inventory.quantity} "
-                f"unit(s) are available.",
+                "unit(s) are available.",
                 [],
                 "update_quantity",
             )
@@ -1736,6 +1889,7 @@ def chat_with_agent(
         not search_terms
         and intent_data.category
     ):
+
         search_terms = [
             intent_data.category
         ]
@@ -1768,7 +1922,8 @@ def chat_with_agent(
     if not agent_products:
 
         return (
-            "I couldn't find matching products right now.",
+            "I couldn't find matching products "
+            "right now.",
             [],
             "search",
         )
@@ -1776,15 +1931,19 @@ def chat_with_agent(
     if len(agent_products) == 1:
 
         message_text = (
-            f"I found {agent_products[0].name} "
-            f"for ₹{agent_products[0].price:.2f}."
+            f"I found "
+            f"{agent_products[0].name} "
+            f"for "
+            f"₹{agent_products[0].price:.2f}."
         )
 
     else:
 
         message_text = (
-            f"I found {len(agent_products)} "
-            "matching product options for you."
+            f"I found "
+            f"{len(agent_products)} "
+            "matching product options "
+            "for you."
         )
 
     return (

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 const API_URL =
   process.env.NEXT_PUBLIC_API_URL ||
@@ -119,6 +119,9 @@ export default function Home() {
   const [message, setMessage] =
     useState("");
 
+  const [isListening, setIsListening] = useState(false);
+  const recognitionRef = useRef<any>(null);
+
   const [agentMessages, setAgentMessages] =
     useState<AgentMessage[]>([
       {
@@ -131,6 +134,117 @@ export default function Home() {
   /* ================================================= */
   /* LOAD PRODUCTS */
   /* ================================================= */
+
+  function speakAgentReply(text: string) {
+  if (typeof window === "undefined" || !("speechSynthesis" in window)) {
+    return;
+  }
+
+  window.speechSynthesis.cancel();
+
+  const cleanText = text
+    .replace(/[*#_`]/g, "")
+    .replace(/₹/g, "rupees ");
+
+  const utterance = new SpeechSynthesisUtterance(cleanText);
+
+  utterance.lang = "en-IN";
+  utterance.rate = 0.95;
+  utterance.pitch = 1;
+
+  window.speechSynthesis.speak(utterance);
+}
+
+  function startVoiceInput() {
+  if (typeof window === "undefined") return;
+
+  const SpeechRecognition =
+    (window as any).SpeechRecognition ||
+    (window as any).webkitSpeechRecognition;
+
+  if (!SpeechRecognition) {
+    alert("Voice input is not supported in this browser.");
+    return;
+  }
+
+  // Stop any agent speech immediately when user starts speaking
+  if ("speechSynthesis" in window) {
+    window.speechSynthesis.cancel();
+  }
+
+  // Stop previous recognition instance if one exists
+  if (recognitionRef.current) {
+    try {
+      recognitionRef.current.stop();
+    } catch {}
+  }
+
+  const recognition = new SpeechRecognition();
+
+  recognition.lang = "en-IN";
+  recognition.continuous = false;
+  recognition.interimResults = false;
+
+  recognition.onstart = () => {
+    setIsListening(true);
+
+    // Double safety: stop agent voice once microphone starts
+    if ("speechSynthesis" in window) {
+      window.speechSynthesis.cancel();
+    }
+  };
+
+  recognition.onresult = (event: any) => {
+    const transcript = event.results[0][0].transcript.trim();
+
+    console.log("VOICE TRANSCRIPT:", transcript);
+
+    const lower = transcript.toLowerCase().trim();
+
+    // Local voice command — DO NOT send "stop" to the AI
+    const stopCommands = [
+      "stop",
+      "stop speaking",
+      "be quiet",
+      "quiet",
+      "chup",
+      "chup karo",
+      "bas",
+      "bas karo",
+      "ruk jao",
+      "ruko",
+    ];
+
+    if (stopCommands.includes(lower)) {
+      if ("speechSynthesis" in window) {
+        window.speechSynthesis.cancel();
+      }
+
+      setIsListening(false);
+      setMessage("");
+      return;
+    }
+
+    setMessage(transcript);
+
+    setTimeout(() => {
+      sendAgentMessage(transcript);
+    }, 100);
+  };
+
+  recognition.onerror = (event: any) => {
+    console.log("VOICE ERROR:", event.error);
+    setIsListening(false);
+  };
+
+  recognition.onend = () => {
+    setIsListening(false);
+  };
+
+  recognitionRef.current = recognition;
+
+  recognition.start();
+}
 
   async function loadProducts() {
     try {
@@ -390,6 +504,9 @@ export default function Home() {
       );
     }
   }
+
+
+  
 
   /* ================================================= */
   /* RAZORPAY CHECKOUT */
@@ -655,12 +772,13 @@ export default function Home() {
   /* REAL AGENT */
   /* ================================================= */
 
-  async function sendAgentMessage() {
-  const text = message.trim();
-
-  if (!text || agentLoading) {
-    return;
+  async function sendAgentMessage(messageOverride?: string) {
+      // Stop any previous agent speech when a new user message is sent
+  if (typeof window !== "undefined" && "speechSynthesis" in window) {
+    window.speechSynthesis.cancel();
   }
+  const text = (messageOverride ?? message).trim();
+  if (!text) return;
 
   // Show user's message immediately
   setAgentMessages((current) => [
@@ -702,6 +820,10 @@ export default function Home() {
       products: AgentProduct[];
       intent: string;
     } = await response.json();
+
+    if (data.message) {
+  speakAgentReply(data.message);
+}
 
     console.log("AGENT RESPONSE:", data);
 
@@ -1280,18 +1402,29 @@ export default function Home() {
 
                     <div className="max-w-[92%]">
 
-                      <div
-                        className={
-                          item.role ===
-                          "user"
-                            ? "rounded-2xl rounded-br-md bg-[var(--primary)] px-4 py-3 text-sm text-white"
-                            : "rounded-2xl rounded-bl-md border border-[var(--border)] bg-[var(--agent-bg)] px-4 py-3 text-sm leading-6"
-                        }
-                      >
-                        {
-                          item.text
-                        }
-                      </div>
+                      <div className="flex items-end gap-2">
+  <div
+    className={
+      item.role ===
+      "user"
+        ? "rounded-2xl rounded-br-md bg-[var(--primary)] px-4 py-3 text-sm text-white"
+        : "rounded-2xl rounded-bl-md border border-[var(--border)] bg-[var(--agent-bg)] px-4 py-3 text-sm leading-6"
+    }
+  >
+    {item.text}
+  </div>
+
+  {item.role !== "user" && (
+    <button
+      type="button"
+      onClick={() => speakAgentReply(item.text)}
+      className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg hover:bg-[var(--hover)] transition"
+      title="Listen to this response"
+    >
+      🔊
+    </button>
+  )}
+</div>
 
                       {/* AGENT PRODUCT RESULTS */}
 
@@ -1495,11 +1628,17 @@ export default function Home() {
                 />
 
                 <button
-                  className="flex h-10 w-10 items-center justify-center rounded-xl text-lg transition hover:bg-[var(--hover)]"
-                  title="Voice shopping"
-                >
-                  🎤
-                </button>
+  onClick={startVoiceInput}
+  disabled={agentLoading}
+  className={`flex h-10 w-10 items-center justify-center rounded-xl text-lg transition ${
+    isListening
+      ? "bg-red-500 text-white animate-pulse"
+      : "hover:bg-[var(--hover)]"
+  }`}
+  title={isListening ? "Stop listening" : "Voice shopping"}
+>
+  {isListening ? "🔴" : "🎤"}
+</button>
 
                 <button
                   onClick={

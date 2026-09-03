@@ -1,26 +1,237 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
+/* ================================================= */
+/* LIGHT MODE */
+/* ================================================= */
+
+.theme-light {
+  --background: #f3f8f4;
+
+  --text: #092328;
+
+  --deep: #092328;
+
+  --surface: #ffffff;
+
+  --header: rgba(255, 255, 255, 0.94);
+
+  --border: #d9e8dc;
+
+  --primary: #2A835F;
+
+  --primary-dark: #12544F;
+
+  --mint: #8BBB92;
+
+  --muted: #61756c;
+
+  --hover: #edf5ef;
+
+  --search-bg: #f7faf8;
+
+  --product-bg: #edf5ef;
+
+  --agent-bg: #f1f8f3;
+
+  --agent-border: #c6ddca;
+
+  --hero: linear-gradient(
+    135deg,
+    #092328 0%,
+    #12544F 55%,
+    #2A835F 100%
+  );
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+/* ================================================= */
+/* DARK MODE */
+/* ================================================= */
+
+.theme-dark {
+  --background: #092328;
+
+  --text: #f1f8f3;
+
+  --deep: #092328;
+
+  --surface: #102f32;
+
+  --header: rgba(9, 35, 40, 0.96);
+
+  --border: #24504d;
+
+  --primary: #2A835F;
+
+  --primary-dark: #12544F;
+
+  --mint: #8BBB92;
+
+  --muted: #a8c1b4;
+
+  --hover: #173b3d;
+
+  --search-bg: #0d292e;
+
+  --product-bg: #153a3b;
+
+  --agent-bg: #123436;
+
+  --agent-border: #285a52;
+
+  --hero: linear-gradient(
+    135deg,
+    #092328 0%,
+    #12544F 60%,
+    #2A835F 100%
+  );
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+/* ================================================= */
+/* BASE */
+/* ================================================= */
+
+html {
+  scroll-behavior: smooth;
 }
 
 body {
+  margin: 0;
+
   background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+
+  color: var(--text);
+
+  font-family:
+    Arial,
+    Helvetica,
+    sans-serif;
+
+  transition:
+    background-color 0.3s ease,
+    color 0.3s ease;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+::selection {
+  background: rgba(139, 187, 146, 0.35);
+}
+
+/* ================================================= */
+/* SCROLLBAR */
+/* ================================================= */
+
+::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #2A835F99;
+
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #2A835F;
+}
+
+/* ================================================= */
+/* PRODUCT CARD */
+/* ================================================= */
+
+.product-card {
+  transition:
+    transform 0.25s ease,
+    box-shadow 0.25s ease,
+    border-color 0.25s ease;
+}
+
+.product-card:hover {
+  transform: translateY(-5px);
+
+  box-shadow:
+    0 18px 40px
+    rgba(9, 35, 40, 0.14);
+
+  border-color: #8BBB92;
+}
+
+/* ================================================= */
+/* AGENT DRAWER */
+/* ================================================= */
+
+.agent-drawer {
+  animation:
+    agentSlideIn
+    0.3s
+    ease-out;
+}
+
+@keyframes agentSlideIn {
+  from {
+    transform: translateX(100%);
+  }
+
+  to {
+    transform: translateX(0);
+  }
+}
+
+/* ================================================= */
+/* FADE ANIMATION */
+/* ================================================= */
+
+.fade-up {
+  animation:
+    fadeUp
+    0.45s
+    ease-out;
+}
+
+@keyframes fadeUp {
+  from {
+    opacity: 0;
+
+    transform:
+      translateY(10px);
+  }
+
+  to {
+    opacity: 1;
+
+    transform:
+      translateY(0);
+  }
+}
+
+/* ================================================= */
+/* INPUT AUTOFILL */
+/* ================================================= */
+
+input:-webkit-autofill,
+input:-webkit-autofill:hover,
+input:-webkit-autofill:focus {
+  -webkit-text-fill-color: var(--text);
+
+  transition:
+    background-color
+    9999s
+    ease-in-out
+    0s;
 }

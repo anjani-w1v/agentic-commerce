@@ -1,0 +1,1268 @@
+import json
+import re
+from decimal import Decimal
+
+from google import genai
+from sqlalchemy import select
+from sqlalchemy.orm import Session, selectinload
+
+from app.core.config import settings
+from app.models.cart import Cart
+from app.models.cart_item import CartItem
+from app.models.product import Product
+from app.models.product_variant import ProductVariant
+from app.schemas.agent import AgentProduct
+from app.services.product_search import search_catalog
+
+
+# ============================================================
+# GEMINI
+# ============================================================
+
+client = genai.Client(
+    api_key=settings.gemini_api_key
+)
+
+
+# ============================================================
+# PRODUCT -> AGENT PRODUCT
+# ============================================================
+
+def convert_to_agent_products(products):
+    results = []
+    seen_products = set()
+
+    for product in products:
+        if product.id in seen_products:
+            continue
+
+        available_variants = [
+            variant
+            for variant in product.variants
+            if (
+                variant.inventory
+                and variant.inventory.quantity > 0
+            )
+        ]
+
+        if not available_variants:
+            continue
+
+        # Cheapest in-stock variant
+        variant = min(
+            available_variants,
+            key=lambda v: Decimal(str(v.price)),
+        )
+
+        results.append(
+            AgentProduct(
+                product_id=product.id,
+                variant_id=variant.id,
+                name=product.name,
+                brand=product.brand,
+                category=product.category,
+                price=float(variant.price),
+                currency=variant.currency,
+                image_url=product.image_url,
+                stock=variant.inventory.quantity,
+            )
+        )
+
+        seen_products.add(product.id)
+
+    return results
+
+
+# ============================================================
+# FIND PRODUCT FROM MESSAGE
+# ============================================================
+
+def find_product_from_message(
+    db: Session,
+    message: str,
+):
+    products = db.scalars(
+        select(Product)
+        .where(Product.is_active.is_(True))
+    ).all()
+
+    text = message.lower()
+
+    # Product name match
+    for product in products:
+        if product.name.lower() in text:
+            return product
+
+    # Brand match
+    for product in products:
+        if product.brand and product.brand.lower() in text:
+            return product
+
+    # Category match
+    for product in products:
+        if product.category and product.category.lower() in text:
+            return product
+
+    return None
+
+
+# ============================================================
+# FALLBACK INTENT PARSER
+# ============================================================
+
+# ============================================================
+# FALLBACK INTENT PARSER
+# ============================================================
+
+def fallback_understand_request(
+    message: str,
+    db: Session,
+):
+    text = message.lower().strip()
+
+    # --------------------------------------------------------
+    # SHOW CART
+    # --------------------------------------------------------
+
+    show_cart_phrases = [
+        "show cart",
+        "show my cart",
+        "cart dikhao",
+        "cart dikha",
+        "mera cart",
+        "my cart",
+        "cart kholo",
+        "cart open",
+        "cart batao",
+    ]
+
+    if any(
+        phrase in text
+        for phrase in show_cart_phrases
+    ):
+        return {
+            "intent": "show_cart",
+            "search_terms": [],
+            "category": None,
+            "max_price": None,
+            "quantity": 1,
+            "product_name": None,
+            "product_names": [],
+            "color": None,
+            "size": None,
+        }
+
+    # --------------------------------------------------------
+    # CHECKOUT
+    # --------------------------------------------------------
+
+    checkout_phrases = [
+        "checkout",
+        "check out",
+        "place order",
+        "place the order",
+        "order place",
+        "order karna",
+        "payment karna",
+        "buy now",
+        "purchase",
+    ]
+
+    if any(
+        phrase in text
+        for phrase in checkout_phrases
+    ):
+        return {
+            "intent": "checkout",
+            "search_terms": [],
+            "category": None,
+            "max_price": None,
+            "quantity": 1,
+            "product_name": None,
+            "product_names": [],
+            "color": None,
+            "size": None,
+        }
+
+    # --------------------------------------------------------
+    # FIND ALL PRODUCTS IN MESSAGE
+    # --------------------------------------------------------
+
+    products = db.scalars(
+        select(Product)
+        .where(Product.is_active.is_(True))
+    ).all()
+
+    matched_products = []
+
+    for product in products:
+        product_name = product.name.lower()
+
+        if product_name in text:
+            matched_products.append(product)
+
+    # Remove duplicate products
+    unique_products = []
+    seen_ids = set()
+
+    for product in matched_products:
+        if product.id not in seen_ids:
+            unique_products.append(product)
+            seen_ids.add(product.id)
+
+    # --------------------------------------------------------
+    # REMOVE
+    # --------------------------------------------------------
+
+    remove_words = [
+        "remove",
+        "delete",
+        "hata do",
+        "hata",
+        "nikal do",
+        "nikaal do",
+    ]
+
+    if any(
+        word in text
+        for word in remove_words
+    ):
+        product = (
+            unique_products[0]
+            if unique_products
+            else None
+        )
+
+        return {
+            "intent": "remove_from_cart",
+            "search_terms": [],
+            "category": None,
+            "max_price": None,
+            "quantity": 1,
+            "product_name": (
+                product.name
+                if product
+                else None
+            ),
+            "product_names": [
+                product.name
+                for product in unique_products
+            ],
+            "color": None,
+            "size": None,
+        }
+
+    # --------------------------------------------------------
+    # UPDATE QUANTITY
+    # --------------------------------------------------------
+
+    quantity_match = re.search(
+        r"(?:quantity|qty|make it|set it to|change to|update to)\s*(\d+)",
+        text,
+    )
+
+    if quantity_match and unique_products:
+        return {
+            "intent": "update_quantity",
+            "search_terms": [],
+            "category": None,
+            "max_price": None,
+            "quantity": int(
+                quantity_match.group(1)
+            ),
+            "product_name": unique_products[0].name,
+            "product_names": [
+                unique_products[0].name
+            ],
+            "color": None,
+            "size": None,
+        }
+
+    # "make StreetFlex Sneakers 3"
+    if unique_products:
+
+        for product in unique_products:
+
+            number_match = re.search(
+                rf"{re.escape(product.name.lower())}\s+(\d+)",
+                text,
+            )
+
+            if number_match:
+                return {
+                    "intent": "update_quantity",
+                    "search_terms": [],
+                    "category": None,
+                    "max_price": None,
+                    "quantity": int(
+                        number_match.group(1)
+                    ),
+                    "product_name": product.name,
+                    "product_names": [
+                        product.name
+                    ],
+                    "color": None,
+                    "size": None,
+                }
+
+    # --------------------------------------------------------
+    # ADD TO CART
+    # --------------------------------------------------------
+
+    add_words = [
+        "add",
+        "cart me",
+        "cart mein",
+        "daal do",
+        "dal do",
+        "buy",
+        "purchase",
+    ]
+
+    if any(
+        word in text
+        for word in add_words
+    ):
+
+        if unique_products:
+            return {
+                "intent": "add_to_cart",
+                "search_terms": [],
+                "category": None,
+                "max_price": None,
+                "quantity": 1,
+                "product_name": unique_products[0].name,
+                "product_names": [
+                    product.name
+                    for product in unique_products
+                ],
+                "color": None,
+                "size": None,
+            }
+
+        return {
+            "intent": "add_to_cart",
+            "search_terms": [],
+            "category": None,
+            "max_price": None,
+            "quantity": 1,
+            "product_name": None,
+            "product_names": [],
+            "color": None,
+            "size": None,
+        }
+
+        # --------------------------------------------------------
+    # NATURAL LANGUAGE SEARCH
+    # --------------------------------------------------------
+
+    search_text = text
+
+    # Remove common shopping phrases so they don't
+    # become search terms.
+    noise_phrases = [
+        "i need",
+        "i want",
+        "i am looking for",
+        "looking for",
+        "show me",
+        "find me",
+        "please",
+        "chahiye",
+        "mujhe",
+        "dikhao",
+        "dikha do",
+        "under",
+        "below",
+        "less than",
+        "upto",
+        "up to",
+    ]
+
+    for phrase in noise_phrases:
+        search_text = search_text.replace(
+            phrase,
+            " ",
+        )
+
+    # --------------------------------------------------------
+    # EXTRACT MAX PRICE
+    # --------------------------------------------------------
+
+    max_price = None
+
+    price_match = re.search(
+        r"(?:under|below|less than|upto|up to)\s*[₹rs\.]*\s*(\d+(?:,\d+)*)",
+        text,
+    )
+
+    if price_match:
+        max_price = float(
+            price_match.group(1).replace(",", "")
+        )
+
+    # --------------------------------------------------------
+    # CATEGORY DETECTION
+    # --------------------------------------------------------
+
+    category = None
+
+    category_aliases = {
+        "shoes": "Running Shoes",
+        "shoe": "Running Shoes",
+        "sneakers": "Sneakers",
+        "sneaker": "Sneakers",
+        "running shoes": "Running Shoes",
+        "hoodie": "Hoodies",
+        "hoodies": "Hoodies",
+        "jeans": "Jeans",
+        "headphones": "Headphones",
+        "headphone": "Headphones",
+        "backpack": "Backpacks",
+        "backpacks": "Backpacks",
+    }
+
+    # Check longer phrases first.
+    for keyword, mapped_category in sorted(
+        category_aliases.items(),
+        key=lambda item: len(item[0]),
+        reverse=True,
+    ):
+        if keyword in text:
+            category = mapped_category
+            break
+
+    # --------------------------------------------------------
+    # CATEGORY-AWARE SEARCH
+    # --------------------------------------------------------
+
+    if category:
+
+        return {
+            "intent": "search",
+            "search_terms": [],
+            "category": category,
+            "max_price": max_price,
+            "quantity": 1,
+            "product_name": None,
+            "product_names": [],
+            "color": None,
+            "size": None,
+        }
+
+    # --------------------------------------------------------
+    # GENERIC SEARCH
+    # --------------------------------------------------------
+
+    cleaned_search = re.sub(
+        r"\b(?:under|below|less than|upto|up to)\b",
+        " ",
+        search_text,
+    )
+
+    cleaned_search = re.sub(
+        r"\b\d+(?:,\d+)*\b",
+        " ",
+        cleaned_search,
+    )
+
+    cleaned_search = " ".join(
+        cleaned_search.split()
+    ).strip()
+
+    if not cleaned_search:
+        cleaned_search = text
+
+    return {
+        "intent": "search",
+        "search_terms": [
+            cleaned_search
+        ],
+        "category": None,
+        "max_price": max_price,
+        "quantity": 1,
+        "product_name": None,
+        "product_names": [],
+        "color": None,
+        "size": None,
+    }
+
+# ============================================================
+# GEMINI INTENT UNDERSTANDING
+# ============================================================
+
+def understand_request(
+    message: str,
+    db: Session,
+):
+    prompt = f"""
+You are an AI shopping assistant for an ecommerce store.
+
+Understand the user's request.
+
+Return ONLY valid JSON.
+
+Allowed intents:
+
+search
+add_to_cart
+remove_from_cart
+show_cart
+update_quantity
+checkout
+
+Return exactly:
+
+{{
+  "intent": "search",
+  "search_terms": [],
+  "category": null,
+  "max_price": null,
+  "quantity": 1,
+  "product_name": null,
+  "product_names": [],
+  "color": null,
+  "size": null
+}}
+
+Examples:
+
+"show my cart" -> show_cart
+
+"cart dikhao" -> show_cart
+
+"remove StreetFlex Sneakers" -> remove_from_cart
+
+"StreetFlex Sneakers hata do" -> remove_from_cart
+
+"add StreetFlex Sneakers to cart" -> add_to_cart
+
+"StreetFlex Sneakers cart me daal do" -> add_to_cart
+
+"make StreetFlex Sneakers quantity 3" -> update_quantity
+
+"checkout" -> checkout
+
+"place order" -> checkout
+
+If the user mentions multiple products, put ALL product names
+in "product_names".
+
+Example:
+
+"add StreetFlex Sneakers and Cloud Hoodie to cart"
+
+->
+
+{{
+  "intent": "add_to_cart",
+  "search_terms": [],
+  "category": null,
+  "max_price": null,
+  "quantity": 1,
+  "product_name": "StreetFlex Sneakers",
+  "product_names": [
+    "StreetFlex Sneakers",
+    "Cloud Hoodie"
+  ],
+  "color": null,
+  "size": null
+}}
+
+User message:
+{message}
+"""
+
+    try:
+        response = client.models.generate_content(
+            model="gemini-3.7-flash",
+            contents=prompt,
+        )
+
+        raw = response.text.strip()
+
+        raw = raw.replace(
+            "```json",
+            "",
+        )
+
+        raw = raw.replace(
+            "```",
+            "",
+        )
+
+        raw = raw.strip()
+
+        return json.loads(raw)
+
+    except Exception as error:
+        print(
+            f"Gemini error: {error}"
+        )
+
+        print(
+            "Using local fallback intent parser."
+        )
+
+        return fallback_understand_request(
+            message,
+            db,
+        )
+
+# ============================================================
+# FIND CART
+# ============================================================
+
+def get_or_create_cart(
+    db: Session,
+    session_id: str,
+):
+    cart = db.scalar(
+        select(Cart)
+        .where(
+            Cart.session_id == session_id
+        )
+        .options(
+            selectinload(Cart.items)
+            .selectinload(CartItem.variant)
+            .selectinload(
+                ProductVariant.product
+            )
+        )
+    )
+
+    if cart:
+        return cart
+
+    cart = Cart(
+        session_id=session_id
+    )
+
+    db.add(cart)
+    db.flush()
+
+    return cart
+
+
+# ============================================================
+# FIND CART ITEM
+# ============================================================
+
+def find_cart_item(
+    db: Session,
+    session_id: str,
+    product_name: str | None,
+):
+    if not product_name:
+        return None
+
+    cart = db.scalar(
+        select(Cart)
+        .where(
+            Cart.session_id == session_id
+        )
+        .options(
+            selectinload(Cart.items)
+            .selectinload(CartItem.variant)
+            .selectinload(
+                ProductVariant.product
+            )
+        )
+    )
+
+    if not cart:
+        return None
+
+    wanted = product_name.lower()
+
+    for item in cart.items:
+
+        if not item.variant:
+            continue
+
+        if not item.variant.product:
+            continue
+
+        actual_name = (
+            item.variant.product.name.lower()
+        )
+
+        if (
+            actual_name == wanted
+            or wanted in actual_name
+            or actual_name in wanted
+        ):
+            return item
+
+    return None
+
+
+# ============================================================
+# ADD PRODUCT TO CART
+# ============================================================
+
+def add_product_to_cart(
+    db: Session,
+    session_id: str,
+    product_name: str,
+    requested_quantity: int = 1,
+):
+    """
+    Real backend cart mutation.
+
+    Business rules:
+    - product must exist
+    - product must be active
+    - variant must be in stock
+    - requested quantity must be positive
+    - existing cart item gets quantity increased
+    - price is stored at time of adding
+    """
+
+    if requested_quantity < 1:
+        requested_quantity = 1
+
+    # --------------------------------------------------------
+    # Find product
+    # --------------------------------------------------------
+
+    products = search_catalog(
+        db=db,
+        search_terms=[product_name],
+        limit=10,
+    )
+
+    agent_products = convert_to_agent_products(
+        products
+    )
+
+    if not agent_products:
+        return None, (
+            f"I couldn't find {product_name} "
+            "in the catalog."
+        )
+
+    selected = agent_products[0]
+
+    # --------------------------------------------------------
+    # Load exact variant
+    # --------------------------------------------------------
+
+    variant = db.scalar(
+        select(ProductVariant)
+        .options(
+            selectinload(
+                ProductVariant.inventory
+            ),
+            selectinload(
+                ProductVariant.product
+            ),
+        )
+        .where(
+            ProductVariant.id
+            == selected.variant_id
+        )
+    )
+
+    if not variant:
+        return None, (
+            "I couldn't find an available "
+            "variant for that product."
+        )
+
+    # --------------------------------------------------------
+    # Inventory validation
+    # --------------------------------------------------------
+
+    if not variant.inventory:
+        return None, (
+            f"{variant.product.name} is currently "
+            "out of stock."
+        )
+
+    available_stock = (
+        variant.inventory.quantity
+    )
+
+    if available_stock < requested_quantity:
+        return None, (
+            f"Only {available_stock} units of "
+            f"{variant.product.name} are available."
+        )
+
+    # --------------------------------------------------------
+    # Get/create cart
+    # --------------------------------------------------------
+
+    cart = get_or_create_cart(
+        db,
+        session_id,
+    )
+
+    # --------------------------------------------------------
+    # Check existing cart item
+    # --------------------------------------------------------
+
+    existing_item = None
+
+    for item in cart.items:
+
+        if (
+            item.variant_id
+            == variant.id
+        ):
+            existing_item = item
+            break
+
+    # --------------------------------------------------------
+    # Existing item
+    # --------------------------------------------------------
+
+    if existing_item:
+
+        new_quantity = (
+            existing_item.quantity
+            + requested_quantity
+        )
+
+        if new_quantity > available_stock:
+            return None, (
+                f"You already have "
+                f"{existing_item.quantity} "
+                f"in your cart. Only "
+                f"{available_stock} are available."
+            )
+
+        existing_item.quantity = (
+            new_quantity
+        )
+
+        existing_item.unit_price = (
+            variant.price
+        )
+
+        db.commit()
+        db.refresh(existing_item)
+
+        return existing_item, (
+            f"Added {requested_quantity} more "
+            f"{variant.product.name}. "
+            f"Your cart now has "
+            f"{new_quantity}."
+        )
+
+    # --------------------------------------------------------
+    # New cart item
+    # --------------------------------------------------------
+
+    cart_item = CartItem(
+        cart_id=cart.id,
+        variant_id=variant.id,
+        quantity=requested_quantity,
+        unit_price=variant.price,
+    )
+
+    db.add(cart_item)
+
+    db.commit()
+    db.refresh(cart_item)
+
+    return cart_item, (
+        f"{variant.product.name} was added "
+        "to your cart. 🛒"
+    )
+
+
+# ============================================================
+# MAIN AGENT
+# ============================================================
+
+def chat_with_agent(
+    message: str,
+    db: Session,
+    session_id: str,
+):
+
+    try:
+
+        # ----------------------------------------------------
+        # UNDERSTAND
+        # ----------------------------------------------------
+
+        intent_data = understand_request(
+            message,
+            db,
+        )
+
+        intent = intent_data.get(
+            "intent",
+            "search",
+        )
+
+        search_terms = (
+            intent_data.get(
+                "search_terms",
+                [],
+            )
+        )
+
+        category = intent_data.get(
+            "category"
+        )
+
+        max_price = intent_data.get(
+            "max_price"
+        )
+
+        quantity = intent_data.get(
+            "quantity",
+            1,
+        )
+
+        product_name = intent_data.get(
+            "product_name"
+        )
+
+        # ====================================================
+        # SEARCH
+        # ====================================================
+
+        if intent == "search":
+
+            terms = list(
+                search_terms or []
+            )
+
+            if category:
+                terms.append(category)
+
+            if not terms:
+                terms = [message]
+
+            products = search_catalog(
+                db=db,
+                search_terms=terms,
+                max_price=(
+                    Decimal(
+                        str(max_price)
+                    )
+                    if max_price is not None
+                    else None
+                ),
+                limit=10,
+            )
+
+            agent_products = (
+                convert_to_agent_products(
+                    products
+                )
+            )
+
+            if not agent_products:
+                return (
+                    "I couldn't find matching "
+                    "products right now.",
+                    [],
+                    "search",
+                )
+
+            return (
+                f"I found "
+                f"{len(agent_products)} "
+                f"matching product"
+                f"{'s' if len(agent_products) != 1 else ''} "
+                "for you.",
+                agent_products,
+                "search",
+            )
+
+        # ====================================================
+        # ADD TO CART
+        # ====================================================
+
+        # ====================================================
+        # ADD TO CART
+        # ====================================================
+
+        if intent == "add_to_cart":
+
+            product_names = intent_data.get(
+                "product_names",
+                [],
+            )
+
+            # Backward compatibility:
+            # If AI returns only product_name,
+            # use that as a single-product request.
+            if not product_names:
+                if product_name:
+                    product_names = [
+                        product_name
+                    ]
+
+            # Fallback if neither exists
+            if not product_names:
+
+                product = (
+                    find_product_from_message(
+                        db,
+                        message,
+                    )
+                )
+
+                if product:
+                    product_names = [
+                        product.name
+                    ]
+
+            if not product_names:
+                return (
+                    "Which product would you "
+                    "like me to add to your cart?",
+                    [],
+                    "add_to_cart",
+                )
+
+            try:
+                quantity = int(quantity)
+            except (
+                TypeError,
+                ValueError,
+            ):
+                quantity = 1
+
+            if quantity < 1:
+                quantity = 1
+
+            added_products = []
+            failed_products = []
+
+            # ------------------------------------------------
+            # ADD EACH PRODUCT
+            # ------------------------------------------------
+
+            for name in product_names:
+
+                cart_item, result_message = (
+                    add_product_to_cart(
+                        db=db,
+                        session_id=session_id,
+                        product_name=name,
+                        requested_quantity=quantity,
+                    )
+                )
+
+                if cart_item:
+                    added_products.append(name)
+                else:
+                    failed_products.append(
+                        result_message
+                    )
+
+            # ------------------------------------------------
+            # RESPONSE
+            # ------------------------------------------------
+
+            if added_products and not failed_products:
+
+                if len(added_products) == 1:
+                    message_text = (
+                        f"{added_products[0]} was added "
+                        "to your cart. 🛒"
+                    )
+                else:
+                    message_text = (
+                        "Added "
+                        + ", ".join(added_products)
+                        + " to your cart. 🛒"
+                    )
+
+                return (
+                    message_text,
+                    [],
+                    "add_to_cart",
+                )
+
+            if added_products and failed_products:
+
+                message_text = (
+                    "Added "
+                    + ", ".join(added_products)
+                    + " to your cart. 🛒\n\n"
+                    + "However, I couldn't add: "
+                    + " ".join(failed_products)
+                )
+
+                return (
+                    message_text,
+                    [],
+                    "add_to_cart",
+                )
+
+            return (
+                "I couldn't add those products "
+                "to your cart.\n\n"
+                + " ".join(failed_products),
+                [],
+                "add_to_cart",
+            )
+
+        # ====================================================
+        # REMOVE FROM CART
+        # ====================================================
+
+        if intent == "remove_from_cart":
+
+            item = find_cart_item(
+                db=db,
+                session_id=session_id,
+                product_name=product_name,
+            )
+
+            if not item:
+                return (
+                    f"I couldn't find "
+                    f"{product_name or 'that product'} "
+                    "in your cart.",
+                    [],
+                    "remove_from_cart",
+                )
+
+            removed_name = (
+                item.variant.product.name
+            )
+
+            db.delete(item)
+            db.commit()
+
+            return (
+                f"{removed_name} has been removed "
+                "from your cart. 🗑️",
+                [],
+                "remove_from_cart",
+            )
+
+        # ====================================================
+        # SHOW CART
+        # ====================================================
+
+        if intent == "show_cart":
+
+            return (
+                "Let me show you what's currently "
+                "in your cart. 🛒",
+                [],
+                "show_cart",
+            )
+
+        # ====================================================
+        # UPDATE QUANTITY
+        # ====================================================
+
+        if intent == "update_quantity":
+
+            if not product_name:
+                return (
+                    "Which product's quantity would "
+                    "you like to change?",
+                    [],
+                    "update_quantity",
+                )
+
+            item = find_cart_item(
+                db=db,
+                session_id=session_id,
+                product_name=product_name,
+            )
+
+            if not item:
+                return (
+                    f"I couldn't find "
+                    f"{product_name} in your cart.",
+                    [],
+                    "update_quantity",
+                )
+
+            try:
+                quantity = int(quantity)
+            except (
+                TypeError,
+                ValueError,
+            ):
+                quantity = 1
+
+            if quantity < 1:
+                return (
+                    "Quantity must be at least 1.",
+                    [],
+                    "update_quantity",
+                )
+
+            if item.variant.inventory:
+
+                available_stock = (
+                    item.variant
+                    .inventory
+                    .quantity
+                )
+
+                if quantity > available_stock:
+                    return (
+                        f"Only {available_stock} "
+                        f"units of "
+                        f"{item.variant.product.name} "
+                        "are available.",
+                        [],
+                        "update_quantity",
+                    )
+
+            item.quantity = quantity
+
+            db.commit()
+
+            return (
+                f"Updated "
+                f"{item.variant.product.name} "
+                f"quantity to {quantity}.",
+                [],
+                "update_quantity",
+            )
+
+        # ====================================================
+        # CHECKOUT
+        # ====================================================
+
+        if intent == "checkout":
+
+            return (
+                "You're ready for checkout. 🛍️",
+                [],
+                "checkout",
+            )
+
+        # ====================================================
+        # UNKNOWN
+        # ====================================================
+
+        return (
+            "I can help you search products, "
+            "manage your cart, and checkout.",
+            [],
+            "unknown",
+        )
+
+    except Exception as error:
+
+        print(
+            "Agent service error:",
+            error,
+        )
+
+        db.rollback()
+
+        return (
+            "Sorry, I couldn't process "
+            "that request right now.",
+            [],
+            "unknown",
+        )

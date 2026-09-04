@@ -16,3 +16,4 @@ razorpay
 google-genai
 openai
 elevenlabs
+psycopg2-binary

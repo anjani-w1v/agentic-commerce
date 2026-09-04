@@ -38,19 +38,32 @@ type Order = {
   items: OrderItem[];
 };
 
+type AuditLog = {
+  id: number;
+  session_id: string;
+  action: string;
+  details: string | null;
+  order_id: number | null;
+  created_at: string;
+};
+
 type Props = {
   darkMode: boolean;
   onOpenAgent: (prompt?: string) => void;
   onViewOrders: () => void;
+  section?: "overview" | "growth" | "recovery" | "orders" | "audit";
 };
 
 export default function MerchantDashboard({
   darkMode,
   onOpenAgent,
   onViewOrders,
+  section = "overview",
 }: Props) {
   const [orders, setOrders] = useState<Order[]>([]);
+  const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
   const [loading, setLoading] = useState(true);
+  const [auditLoading, setAuditLoading] = useState(true);
 
   useEffect(() => {
     async function loadOrders() {
@@ -78,7 +91,33 @@ export default function MerchantDashboard({
     loadOrders();
   }, []);
 
-    const pendingPaymentOrders = useMemo(() => {
+  useEffect(() => {
+    async function loadAuditLogs() {
+      try {
+        const response = await fetch(
+          `${API_URL}/api/audit/${SESSION_ID}`,
+          {
+            cache: "no-store",
+          },
+        );
+
+        if (!response.ok) {
+          throw new Error("Failed to load audit logs");
+        }
+
+        const data = await response.json();
+        setAuditLogs(Array.isArray(data) ? data : []);
+      } catch (error) {
+        console.error("Dashboard audit loading failed:", error);
+      } finally {
+        setAuditLoading(false);
+      }
+    }
+
+    loadAuditLogs();
+  }, []);
+
+  const pendingPaymentOrders = useMemo(() => {
     return orders.filter(
       (order) =>
         order.payment_status?.toLowerCase() !== "paid",
@@ -191,6 +230,21 @@ export default function MerchantDashboard({
       .replace(/\b\w/g, (letter) => letter.toUpperCase());
   };
 
+  const showOverview =
+    section === "overview";
+
+  const showGrowth =
+    section === "growth";
+
+  const showRecovery =
+    section === "recovery";
+
+  const showOrders =
+    section === "orders";
+
+  const showAudit =
+    section === "audit";
+
   return (
     <section className="mx-auto max-w-7xl px-4 pt-6 sm:px-6">
       {/* HERO */}
@@ -227,8 +281,9 @@ export default function MerchantDashboard({
           </div>
         </div>
 
-        <div className="pointer-events-none absolute -right-12 -top-16 hidden h-64 w-64 rounded-full bg-[var(--sage)] opacity-60 blur-2xl sm:block" />
+        <div className="pointer-events-none absolute -right-12 -top-16 hidden h-64 w-64 rounded-full bg-[var(--sage)] opacity-60 blur-2xl sm:block"/>
       </div>
+
 
       {/* REAL STATS */}
       <div className="mt-5 grid grid-cols-2 gap-3 lg:grid-cols-4">
@@ -271,6 +326,86 @@ export default function MerchantDashboard({
           }
           change={paidOrdersList.length ? `${paidOrdersList.length} paid` : "—"}
         />
+      </div>
+
+      {/* AI REVENUE GROWTH ENGINE */}
+      <div className="mt-5 rounded-3xl border border-[var(--border)] bg-[var(--surface)] p-5 shadow-sm">
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <div className="flex flex-wrap items-center gap-2">
+              <h2 className="font-extrabold">AI Revenue Growth Engine</h2>
+              <span className="rounded-full bg-[var(--sage)] px-2 py-1 text-[10px] font-bold text-[var(--primary)]">
+                AGENTIC
+              </span>
+            </div>
+
+            <p className="mt-2 text-sm leading-6 text-[var(--muted)]">
+              The commerce agent turns customer conversations into measurable
+              revenue opportunities across discovery, upsell, campaigns and recovery.
+            </p>
+          </div>
+
+          <button
+            onClick={() =>
+              onOpenAgent(
+                "Analyze my sales and recommend the highest-impact action to grow revenue."
+              )
+            }
+            className="shrink-0 rounded-xl bg-[var(--primary)] px-5 py-3 text-sm font-bold text-white transition hover:bg-[var(--primary-dark)]"
+          >
+            Ask AI to Grow Revenue →
+          </button>
+        </div>
+
+        <div className="mt-5 grid gap-3 sm:grid-cols-4">
+          <div className="rounded-2xl bg-[var(--agent-bg)] p-4">
+            <p className="text-xs font-bold text-[var(--muted)]">
+              💰 Revenue
+            </p>
+            <p className="mt-2 text-lg font-extrabold">
+              {formatCurrency(revenue)}
+            </p>
+            <p className="mt-1 text-[10px] text-[var(--muted)]">
+              Successful payments
+            </p>
+          </div>
+
+          <div className="rounded-2xl bg-[var(--agent-bg)] p-4">
+            <p className="text-xs font-bold text-[var(--muted)]">
+              🛍️ Basket Size
+            </p>
+            <p className="mt-2 text-lg font-extrabold">
+              {formatCurrency(averageOrderValue)}
+            </p>
+            <p className="mt-1 text-[10px] text-[var(--muted)]">
+              Average order value
+            </p>
+          </div>
+
+          <div className="rounded-2xl bg-[var(--agent-bg)] p-4">
+            <p className="text-xs font-bold text-[var(--muted)]">
+              🎯 Campaigns
+            </p>
+            <p className="mt-2 text-lg font-extrabold">
+              AI-powered
+            </p>
+            <p className="mt-1 text-[10px] text-[var(--muted)]">
+              Growth proposals with approval gates
+            </p>
+          </div>
+
+          <div className="rounded-2xl bg-[var(--agent-bg)] p-4">
+            <p className="text-xs font-bold text-[var(--muted)]">
+              🔒 Safe Actions
+            </p>
+            <p className="mt-2 text-lg font-extrabold">
+              Bounded
+            </p>
+            <p className="mt-1 text-[10px] text-[var(--muted)]">
+              Explainable + merchant confirmed
+            </p>
+          </div>
+        </div>
       </div>
 
       {/* SALES + AI */}
@@ -513,6 +648,7 @@ export default function MerchantDashboard({
         </div>
       </div>
 
+      
             {/* REVENUE RECOVERY */}
       <div className="mt-5 rounded-3xl border border-[var(--border)] bg-[var(--surface)] p-5 shadow-sm">
         <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
@@ -543,7 +679,11 @@ export default function MerchantDashboard({
 
           {pendingPaymentOrders.length > 0 && (
             <button
-              onClick={() => onOpenAgent()}
+              onClick={() =>
+                onOpenAgent(
+                  "Analyze my pending payments and recommend the safest revenue recovery action."
+                )
+              }
               className="shrink-0 rounded-xl bg-[var(--primary)] px-5 py-3 text-sm font-bold text-white transition hover:bg-[var(--primary-dark)]"
             >
               Recover Revenue →
@@ -581,6 +721,132 @@ export default function MerchantDashboard({
             </div>
           </div>
         )}
+      </div>
+
+      {/* AI AUDIT TRAIL */}
+      <div className="mt-5 rounded-3xl border border-[var(--border)] bg-[var(--surface)] p-5 shadow-sm">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-lg">🧾</span>
+              <h2 className="font-extrabold">
+                AI Agent Audit Trail
+              </h2>
+
+              <span className="rounded-full bg-[var(--sage)] px-2 py-1 text-[10px] font-bold text-[var(--primary)]">
+                TRACEABLE
+              </span>
+            </div>
+
+            <p className="mt-2 text-sm leading-6 text-[var(--muted)]">
+              Every revenue-related agent action is recorded with an
+              explainable decision, safety boundary and execution status.
+            </p>
+          </div>
+
+          <div className="rounded-xl bg-[var(--agent-bg)] px-4 py-2 text-xs font-bold text-[var(--muted)]">
+            {auditLoading
+              ? "Loading..."
+              : `${auditLogs.length} recorded action${
+                  auditLogs.length === 1 ? "" : "s"
+                }`}
+          </div>
+        </div>
+
+        <div className="mt-5 grid gap-3 sm:grid-cols-4">
+          <div className="rounded-2xl bg-[var(--agent-bg)] p-4">
+            <p className="text-xs font-bold text-[var(--muted)]">
+              🔍 Explainable
+            </p>
+            <p className="mt-2 text-sm font-extrabold">
+              Decision logged
+            </p>
+            <p className="mt-1 text-[10px] text-[var(--muted)]">
+              Reason and action are recorded
+            </p>
+          </div>
+
+          <div className="rounded-2xl bg-[var(--agent-bg)] p-4">
+            <p className="text-xs font-bold text-[var(--muted)]">
+              🔒 Bounded
+            </p>
+            <p className="mt-2 text-sm font-extrabold">
+              Safety limits
+            </p>
+            <p className="mt-1 text-[10px] text-[var(--muted)]">
+              Actions stay within defined bounds
+            </p>
+          </div>
+
+          <div className="rounded-2xl bg-[var(--agent-bg)] p-4">
+            <p className="text-xs font-bold text-[var(--muted)]">
+              ✅ Gated
+            </p>
+            <p className="mt-2 text-sm font-extrabold">
+              Merchant confirmed
+            </p>
+            <p className="mt-1 text-[10px] text-[var(--muted)]">
+              Money actions require approval
+            </p>
+          </div>
+
+          <div className="rounded-2xl bg-[var(--agent-bg)] p-4">
+            <p className="text-xs font-bold text-[var(--muted)]">
+              🧪 Sandbox
+            </p>
+            <p className="mt-2 text-sm font-extrabold">
+              Safe execution
+            </p>
+            <p className="mt-1 text-[10px] text-[var(--muted)]">
+              No automatic customer charges
+            </p>
+          </div>
+        </div>
+
+        <div className="mt-5 overflow-hidden rounded-2xl border border-[var(--border)]">
+          {auditLoading ? (
+            <div className="p-5 text-sm text-[var(--muted)]">
+              Loading agent activity...
+            </div>
+          ) : auditLogs.length === 0 ? (
+            <div className="p-5 text-sm text-[var(--muted)]">
+              No agent actions have been recorded yet.
+            </div>
+          ) : (
+            <div className="divide-y divide-[var(--border)]">
+              {auditLogs.slice(0, 8).map((log) => (
+                <div
+                  key={log.id}
+                  className="p-4 transition hover:bg-[var(--agent-bg)]"
+                >
+                  <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="rounded-lg bg-[var(--sage)] px-2 py-1 text-[10px] font-extrabold text-[var(--primary)]">
+                          {log.action.replaceAll("_", " ")}
+                        </span>
+
+                        {log.order_id && (
+                          <span className="text-[10px] font-bold text-[var(--muted)]">
+                            Order #{log.order_id}
+                          </span>
+                        )}
+                      </div>
+
+                      <p className="mt-2 text-xs leading-5 text-[var(--muted)]">
+                        {log.details || "Agent action recorded."}
+                      </p>
+                    </div>
+
+                    <span className="shrink-0 text-[10px] font-medium text-[var(--muted)]">
+                      {new Date(log.created_at).toLocaleString("en-IN")}
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
 
       {/* RECENT ORDERS + QUICK ACTIONS */}

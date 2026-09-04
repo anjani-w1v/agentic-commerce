@@ -1,5 +1,6 @@
 import json
 import re
+import uuid
 from decimal import Decimal
 
 from google import genai
@@ -29,6 +30,135 @@ from app.services.product_search import search_catalog
 # It does NOT apply discounts or perform money actions.
 # Merchant confirmation is required before execution.
 # ============================================================
+
+def get_revenue_recovery_proposal(
+    db: Session,
+    session_id: str,
+):
+    pending_orders = db.scalars(
+        select(Order)
+        .where(
+            Order.session_id == session_id,
+            Order.payment_status != "paid",
+        )
+        .order_by(Order.created_at.desc())
+        .limit(20)
+    ).all()
+
+    if not pending_orders:
+        return {
+            "has_opportunity": False,
+            "order_count": 0,
+            "at_risk_value": 0.0,
+            "action": "none",
+            "reason": "No pending payments were found.",
+            "bounded_action": (
+                "No recovery action will be executed because "
+                "there are no pending payments."
+            ),
+        }
+
+    at_risk_value = sum(
+        float(order.subtotal or 0)
+        for order in pending_orders
+    )
+
+    max_recovery_value = 100000.0
+
+    if at_risk_value > max_recovery_value:
+        return {
+            "has_opportunity": True,
+            "order_count": len(pending_orders),
+            "at_risk_value": at_risk_value,
+            "action": "blocked",
+            "reason": (
+                f"Pending payment value exceeds the ₹{max_recovery_value:,.0f} "
+                "recovery safety bound."
+            ),
+            "bounded_action": (
+                f"Recovery is capped at ₹{max_recovery_value:,.0f}. "
+                "Merchant confirmation is required."
+            ),
+        }
+
+    return {
+        "has_opportunity": True,
+        "order_count": len(pending_orders),
+        "at_risk_value": at_risk_value,
+        "action": "secure_payment_retry",
+        "reason": (
+            "The safest recovery path is to guide customers back to "
+            "a secure payment checkout and allow them to retry payment. "
+            "No automatic customer charge should be attempted."
+        ),
+        "bounded_action": (
+            "Bounded action: prepare a secure payment-retry recovery "
+            "for these pending orders. Merchant confirmation is required; "
+            "no customer is charged automatically."
+        ),
+    }
+
+
+def execute_revenue_recovery_sandbox(
+    db: Session,
+    session_id: str,
+    proposal: dict,
+):
+    recovery_id = f"recovery_{uuid.uuid4().hex[:10]}"
+
+    log_agent_action(
+        db=db,
+        session_id=session_id,
+        action="REVENUE_RECOVERY_EXECUTED",
+        details=(
+            f"Sandbox revenue recovery {recovery_id} executed. "
+            f"Action: secure payment retry. "
+            f"Orders: {proposal['order_count']}. "
+            f"Revenue at risk: ₹{proposal['at_risk_value']:,.2f}. "
+            f"Bound: <= ₹100,000. "
+            f"Merchant confirmed: True. "
+            f"No automatic customer charge."
+        ),
+    )
+
+    return {
+        "recovery_id": recovery_id,
+        "message": (
+            "Secure payment-retry recovery prepared in sandbox mode. "
+            "No customer was charged automatically."
+        ),
+    }
+
+
+def execute_campaign_sandbox(
+    db: Session,
+    session_id: str,
+    proposal: dict,
+):
+    campaign_id = f"camp_{uuid.uuid4().hex[:10]}"
+
+    log_agent_action(
+        db=db,
+        session_id=session_id,
+        action="CAMPAIGN_EXECUTED",
+        details=(
+            f"Sandbox campaign {campaign_id} executed. "
+            f"Type: {proposal['campaign_type']}. "
+            f"Target: {proposal['target']}. "
+            f"Discount: 10.00%. "
+            f"Bound: <= 10%. "
+            f"Merchant confirmed: True."
+        ),
+    )
+
+    return {
+        "campaign_id": campaign_id,
+        "message": (
+            "Campaign executed in sandbox mode. "
+            "No customer payment or product price was changed."
+        ),
+    }
+
 
 def get_campaign_proposal(
     db: Session,
@@ -186,6 +316,8 @@ def get_conversation_context(session_id: str) -> dict:
             "last_products": [],
             "last_recommendation": None,
             "last_intent": None,
+            "last_campaign_proposal": None,
+            "last_recovery_proposal": None,
         },
     )
 
@@ -195,6 +327,8 @@ def save_conversation_context(
     products=None,
     recommendation=None,
     intent=None,
+    campaign_proposal=None,
+    recovery_proposal=None,
 ):
     current = conversation_memory.get(
         session_id,
@@ -202,6 +336,8 @@ def save_conversation_context(
             "last_products": [],
             "last_recommendation": None,
             "last_intent": None,
+            "last_campaign_proposal": None,
+            "last_recovery_proposal": None,
         },
     )
 
@@ -215,6 +351,12 @@ def save_conversation_context(
 
     if intent is not None:
         current["last_intent"] = intent
+
+    if campaign_proposal is not None:
+        current["last_campaign_proposal"] = campaign_proposal
+
+    if recovery_proposal is not None:
+        current["last_recovery_proposal"] = recovery_proposal
 
     conversation_memory[session_id] = current
 
@@ -300,6 +442,8 @@ def find_product_from_message(
     db: Session,
 ):
     message_lower = message.lower().strip()
+
+    # ========================================================
 
     products = db.scalars(
         select(Product)
@@ -1319,6 +1463,170 @@ def chat_with_agent(
 ):
 
     message_lower = message.lower().strip()
+    
+    # ========================================================
+    # REVENUE RECOVERY CONFIRMATION
+    # ========================================================
+
+    recovery_confirmation_phrases = [
+        "yes, recover it",
+        "yes recover it",
+        "recover it",
+        "execute recovery",
+        "execute the recovery",
+        "launch recovery",
+        "start recovery",
+        "proceed with recovery",
+        "haan recover karo",
+        "recovery chalao",
+        "recovery karo",
+        "secure checkout",
+        "secure checkouts",
+        "proceed with secure checkout",
+        "proceed with secure checkouts",
+    ]
+
+    if any(
+        phrase in message_lower
+        for phrase in recovery_confirmation_phrases
+    ):
+        context = get_conversation_context(session_id)
+        proposal = context.get("last_recovery_proposal")
+
+        if not proposal:
+            return (
+                "I don't have a pending revenue-recovery proposal to execute. "
+                "Please ask me to analyze the pending payments first.",
+                [],
+                "revenue_recovery",
+            )
+
+        # HARD SAFETY GUARD:
+        # A blocked recovery proposal can NEVER be executed.
+        if proposal.get("action") == "blocked":
+            log_agent_action(
+                db=db,
+                session_id=session_id,
+                action="REVENUE_RECOVERY_BLOCKED",
+                details=(
+                    "Recovery confirmation received, but execution remained "
+                    "blocked because revenue at risk exceeded the ₹100,000 "
+                    "safety bound."
+                ),
+            )
+
+            return (
+                "🔒 Revenue Recovery Still Blocked\n\n"
+                f"Pending orders: {proposal['order_count']}\n"
+                f"Revenue at risk: ₹{proposal['at_risk_value']:,.2f}\n\n"
+                f"Why: {proposal['reason']}\n\n"
+                "The ₹100,000 safety bound has been exceeded, so I will not "
+                "execute the recovery action.\n\n"
+                "No customer was charged and no recovery action was executed.",
+                [],
+                "revenue_recovery_blocked",
+            )
+
+        if proposal.get("action") == "secure_payment_retry":
+            execution = execute_revenue_recovery_sandbox(
+                db=db,
+                session_id=session_id,
+                proposal=proposal,
+            )
+
+            save_conversation_context(
+                session_id=session_id,
+                intent="revenue_recovery_executed",
+            )
+
+            context_after = get_conversation_context(session_id)
+            context_after["last_recovery_proposal"] = None
+
+            return (
+                "✅ Secure revenue recovery approved and prepared.\n\n"
+                f"Pending orders: {proposal['order_count']}\n"
+                f"Revenue at risk: ₹{proposal['at_risk_value']:,.2f}\n"
+                "Action: Secure payment retry\n"
+                "Safety bound: ₹100,000\n"
+                f"Recovery ID: {execution['recovery_id']}\n\n"
+                f"🔒 {execution['message']}",
+                [],
+                "revenue_recovery_executed",
+            )
+
+        return (
+            "This recovery proposal cannot be executed because its action "
+            "is not permitted by the current safety policy.",
+            [],
+            "revenue_recovery_blocked",
+        )
+
+
+
+    # ========================================================
+    # CAMPAIGN CONFIRMATION
+    # ========================================================
+
+    campaign_confirmation_phrases = [
+        "yes, launch it",
+        "yes launch it",
+        "launch it",
+        "launch the campaign",
+        "start it",
+        "start the campaign",
+        "run it",
+        "run the campaign",
+        "execute it",
+        "execute the campaign",
+        "yes do it",
+        "yes, do it",
+        "haan launch karo",
+        "haan campaign chalao",
+        "campaign chalao",
+        "campaign launch karo",
+    ]
+
+    if any(
+        phrase in message_lower
+        for phrase in campaign_confirmation_phrases
+    ):
+        context = get_conversation_context(session_id)
+        proposal = context.get("last_campaign_proposal")
+
+        if proposal:
+            execution = execute_campaign_sandbox(
+                db=db,
+                session_id=session_id,
+                proposal=proposal,
+            )
+
+            save_conversation_context(
+                session_id=session_id,
+                intent="campaign_executed",
+            )
+
+            context_after = get_conversation_context(session_id)
+            context_after["last_campaign_proposal"] = None
+
+            return (
+                "✅ Campaign approved and executed.\n\n"
+                f"Campaign: {proposal['title']}\n"
+                f"Target: {proposal['target']}\n"
+                f"Type: {proposal['campaign_type'].replace('_', ' ').title()}\n"
+                "Discount cap: 10%\n"
+                f"Campaign ID: {execution['campaign_id']}\n\n"
+                f"🔒 {execution['message']}",
+                [],
+                "campaign_executed",
+            )
+
+        return (
+            "I don't have a pending campaign proposal to execute. "
+            "Please ask me to create a campaign first.",
+            [],
+            "campaign",
+        )
+
 
         # ORDER HISTORY / ORDER STATUS
     order_phrases = [
@@ -1377,6 +1685,30 @@ def chat_with_agent(
     # ========================================================
     # HARD RECOMMENDATION DETECTION
     # ========================================================
+
+    # ========================================================
+    # REVENUE RECOVERY DETECTION
+    # ========================================================
+
+    revenue_recovery_phrases = [
+        "analyze my pending payments",
+        "pending payments",
+        "revenue recovery",
+        "recover revenue",
+        "recover my revenue",
+        "recover pending payments",
+        "payment recovery",
+        "payments at risk",
+        "recovery action",
+        "secure payment retry",
+        "secure checkout",
+        "secure checkouts",
+    ]
+
+    revenue_recovery_detected = any(
+        phrase in message_lower
+        for phrase in revenue_recovery_phrases
+    )
 
     campaign_phrases = [
         "create a campaign",
@@ -1477,6 +1809,223 @@ def chat_with_agent(
         session_id
     )
 
+    previous_products = context.get(
+        "last_products",
+        []
+    )
+
+    # --------------------------------------------------------
+    # NATURAL-LANGUAGE PRODUCT SELECTION
+    # --------------------------------------------------------
+    # "add first"  -> product #1
+    # "add second" -> product #2
+    # "add third"  -> product #3
+
+    ordinal_indexes = {
+        "first": 0,
+        "1st": 0,
+        "second": 1,
+        "2nd": 1,
+        "third": 2,
+        "3rd": 2,
+        "fourth": 3,
+        "4th": 3,
+        "fifth": 4,
+        "5th": 4,
+    }
+
+    if previous_products:
+        natural_selection = None
+
+        if message_lower.startswith("add "):
+            selection_word = message_lower[4:].strip()
+
+            natural_selection = ordinal_indexes.get(
+                selection_word
+            )
+
+        if (
+            natural_selection is not None
+            and 0 <= natural_selection < len(previous_products)
+        ):
+            selected_product = previous_products[natural_selection]
+
+            try:
+                product_name = selected_product.name
+            except Exception:
+                product_name = None
+
+            if product_name:
+                added, result_message = add_product_to_cart(
+                    db=db,
+                    session_id=session_id,
+                    product_name=product_name,
+                    requested_quantity=1,
+                )
+
+                if added:
+                    save_conversation_context(
+                        session_id=session_id,
+                        intent="add_to_cart",
+                    )
+
+                    return (
+                        f"{product_name} was added "
+                        "to your cart. 🛒",
+                        [],
+                        "add_to_cart",
+                    )
+
+                return (
+                    result_message,
+                    [],
+                    "add_to_cart",
+                )
+
+    # --------------------------------------------------------
+    # NUMBERED PRODUCT SELECTION
+    # --------------------------------------------------------
+    # Examples:
+    # "add 1"       -> product #1
+    # "add 2"       -> product #2
+    # "add 1 and 2" -> products #1 and #2
+    # "add both"    -> all displayed products
+    #
+    # If only one product was displayed:
+    # "add 2" means quantity 2 of that product.
+
+    previous_products = context.get("last_products", [])
+
+    if previous_products:
+        selected_indexes = []
+
+        if message_lower in {
+            "add both",
+            "add both of them",
+            "add both products",
+            "dono add karo",
+            "dono daal do",
+        }:
+            selected_indexes = list(range(len(previous_products)))
+
+        else:
+            # Parse numbered selections without depending on the
+            # module-level "re" import.
+            words = (
+                message_lower
+                .replace(",", " ")
+                .replace("&", " ")
+                .split()
+            )
+
+            if words and words[0] in {"add", "daal", "dal"}:
+                for word in words[1:]:
+                    if word.isdigit():
+                        selected_indexes.append(
+                            int(word) - 1
+                        )
+
+        valid_indexes = sorted(
+            set(
+                index
+                for index in selected_indexes
+                if 0 <= index < len(previous_products)
+            )
+        )
+
+        if valid_indexes and len(previous_products) > 1:
+            added_names = []
+
+            for index in valid_indexes:
+                selected_product = previous_products[index]
+
+                try:
+                    product_name = selected_product.name
+                except Exception:
+                    continue
+
+                added, result_message = add_product_to_cart(
+                    db=db,
+                    session_id=session_id,
+                    product_name=product_name,
+                    requested_quantity=1,
+                )
+
+                if added:
+                    added_names.append(product_name)
+
+            if added_names:
+                save_conversation_context(
+                    session_id=session_id,
+                    intent="add_to_cart",
+                )
+
+                return (
+                    "Added to your cart: "
+                    + ", ".join(added_names)
+                    + " 🛒",
+                    [],
+                    "add_to_cart",
+                )
+
+    # --------------------------------------------------------
+    # QUANTITY + PRODUCT NAME
+    # --------------------------------------------------------
+    # Examples:
+    # "add 2 Velocity Runner"
+    # "add 2 of Velocity Runner"
+
+    # --------------------------------------------------------
+    # QUANTITY + PRODUCT NAME
+    # --------------------------------------------------------
+    # Examples:
+    # "add 2 Velocity Runner"
+    # "add 2 of Velocity Runner"
+    #
+    # Parse this without using the "re" module because
+    # chat_with_agent already has another local "re" reference.
+
+    quantity_words = message_lower.split()
+
+    if (
+        len(quantity_words) >= 3
+        and quantity_words[0] in {"add", "daal", "dal"}
+        and quantity_words[1].isdigit()
+    ):
+        requested_quantity = int(quantity_words[1])
+
+        requested_name_words = quantity_words[2:]
+
+        if (
+            requested_name_words
+            and requested_name_words[0] == "of"
+        ):
+            requested_name_words = requested_name_words[1:]
+
+        requested_name = " ".join(
+            requested_name_words
+        ).strip()
+
+        if requested_quantity > 0 and requested_name:
+            added, result_message = add_product_to_cart(
+                db=db,
+                session_id=session_id,
+                product_name=requested_name,
+                requested_quantity=requested_quantity,
+            )
+
+            if added:
+                save_conversation_context(
+                    session_id=session_id,
+                    intent="add_to_cart",
+                )
+
+                return (
+                    result_message + " 🛒",
+                    [],
+                    "add_to_cart",
+                )
+
     confirmation_phrases = {
         "add",
         "add it",
@@ -1487,26 +2036,55 @@ def chat_with_agent(
         "yeah",
         "yep",
         "haan",
+        "han",
         "haan add karo",
+        "han add karo",
+        "haan add kar do",
+        "han add kar do",
         "ha add karo",
+        "ha add kar do",
+        "yes add it",
+        "yes add this",
+        "yes add that",
+        "yes added",
+        "yes add kar do",
+        "yes add karo",
         "add karo",
+        "add kar do",
         "isko add karo",
+        "isko add kar do",
         "ye add karo",
+        "ye add kar do",
         "yeh add karo",
+        "yeh add kar do",
         "daal do",
         "dal do",
         "cart mein daal do",
         "cart me daal do",
     }
 
-    if (
-        message_lower in confirmation_phrases
-        and context.get("last_recommendation")
-    ):
+    if message_lower in confirmation_phrases:
 
         recommended_name = (
-            context["last_recommendation"]
+            context.get("last_recommendation")
         )
+
+        # If there is no explicit recommendation, fall back
+        # to the single most recently displayed product.
+        if not recommended_name and len(previous_products) == 1:
+            try:
+                recommended_name = (
+                    previous_products[0].name
+                )
+            except Exception:
+                recommended_name = None
+
+        if not recommended_name:
+            return (
+                "Which product would you like me to add?",
+                [],
+                "add_to_cart",
+            )
 
         (
             added,
@@ -1646,7 +2224,9 @@ def chat_with_agent(
 
     intent = intent_data.intent
 
-    if campaign_detected:
+    if revenue_recovery_detected:
+        intent = "revenue_recovery"
+    elif campaign_detected:
         intent = "campaign"
 
     # ========================================================
@@ -1694,6 +2274,86 @@ def chat_with_agent(
     # RECOMMEND
     # ========================================================
 
+    if intent == "revenue_recovery":
+        proposal = get_revenue_recovery_proposal(
+            db=db,
+            session_id=session_id,
+        )
+
+        if not proposal["has_opportunity"]:
+            log_agent_action(
+                db=db,
+                session_id=session_id,
+                action="REVENUE_RECOVERY_PROPOSED",
+                details="No pending payments found.",
+            )
+
+            return (
+                "💸 AI Revenue Recovery\n\n"
+                "No pending payments are currently at risk. "
+                "There is nothing to recover right now.",
+                [],
+                "revenue_recovery",
+            )
+
+        if proposal["action"] == "blocked":
+            log_agent_action(
+                db=db,
+                session_id=session_id,
+                action="REVENUE_RECOVERY_BLOCKED",
+                details=proposal["reason"],
+            )
+
+            save_conversation_context(
+                session_id=session_id,
+                intent="revenue_recovery",
+                recovery_proposal=proposal,
+            )
+
+            return (
+                "🔒 Revenue Recovery Blocked\n\n"
+                f"Pending orders: {proposal['order_count']}\n"
+                f"Revenue at risk: ₹{proposal['at_risk_value']:,.2f}\n\n"
+                f"Why: {proposal['reason']}\n\n"
+                f"{proposal['bounded_action']}\n\n"
+                "No recovery action can be executed while the safety bound is exceeded.",
+                [],
+                "revenue_recovery",
+            )
+
+        recovery_message = (
+            "💸 AI Revenue Recovery Proposal\n\n"
+            f"Pending orders: {proposal['order_count']}\n"
+            f"Revenue at risk: ₹{proposal['at_risk_value']:,.2f}\n\n"
+            "Recommended action: Secure payment retry\n"
+            f"Why: {proposal['reason']}\n\n"
+            f"🔒 {proposal['bounded_action']}\n\n"
+            "Say “Yes, recover it” to proceed."
+        )
+
+        log_agent_action(
+            db=db,
+            session_id=session_id,
+            action="REVENUE_RECOVERY_PROPOSED",
+            details=(
+                f"Orders: {proposal['order_count']}. "
+                f"Revenue at risk: ₹{proposal['at_risk_value']:,.2f}. "
+                "Recommended action: secure payment retry."
+            ),
+        )
+
+        save_conversation_context(
+            session_id=session_id,
+            intent="revenue_recovery",
+            recovery_proposal=proposal,
+        )
+
+        return (
+            recovery_message,
+            [],
+            "revenue_recovery",
+        )
+
     if intent == "campaign":
         proposal = get_campaign_proposal(
             db=db,
@@ -1713,6 +2373,7 @@ def chat_with_agent(
         save_conversation_context(
             session_id=session_id,
             intent="campaign",
+            campaign_proposal=proposal,
         )
 
         return (

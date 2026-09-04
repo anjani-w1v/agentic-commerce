@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import MerchantDashboard from "./components/MerchantDashboard";
+import MerchantSidebar from "./components/MerchantSidebar";
 
 
 const API_URL =
@@ -82,9 +83,7 @@ const categories = [
 ];
 
 export default function Home() {
-  const [darkMode, setDarkMode] =
-    useState(false);
-
+ 
   const [agentOpen, setAgentOpen] =
     useState(false);
 
@@ -138,24 +137,52 @@ export default function Home() {
   /* ================================================= */
 
   function speakAgentReply(text: string) {
-  if (typeof window === "undefined" || !("speechSynthesis" in window)) {
-    return;
+    if (
+      typeof window === "undefined" ||
+      !("speechSynthesis" in window)
+    ) {
+      return;
+    }
+
+    const speech = window.speechSynthesis;
+
+    speech.cancel();
+
+    const cleanText = text
+      .replace(/[*#_`]/g, "")
+      .replace(/₹/g, "rupees ")
+      .replace(/→/g, "")
+      .replace(/🔒|💸|✅/g, "");
+
+    const utterance = new SpeechSynthesisUtterance(
+      cleanText,
+    );
+
+    utterance.lang = "en-IN";
+    utterance.rate = 0.95;
+    utterance.pitch = 1;
+
+    utterance.onstart = () => {
+      console.log("Agent speech started");
+    };
+
+    utterance.onend = () => {
+      console.log("Agent speech finished");
+    };
+
+    utterance.onerror = (event) => {
+      console.error(
+        "Agent speech error:",
+        event.error,
+      );
+    };
+
+    // Chrome can occasionally ignore speech immediately
+    // after cancel(), so queue it on the next event loop.
+    setTimeout(() => {
+      speech.speak(utterance);
+    }, 100);
   }
-
-  window.speechSynthesis.cancel();
-
-  const cleanText = text
-    .replace(/[*#_`]/g, "")
-    .replace(/₹/g, "rupees ");
-
-  const utterance = new SpeechSynthesisUtterance(cleanText);
-
-  utterance.lang = "en-IN";
-  utterance.rate = 0.95;
-  utterance.pitch = 1;
-
-  window.speechSynthesis.speak(utterance);
-}
 
   function startVoiceInput() {
   if (typeof window === "undefined") return;
@@ -1004,13 +1031,10 @@ export default function Home() {
   /* ================================================= */
 
   return (
-    <main
-      className={
-        darkMode
-          ? "theme-dark min-h-screen"
-          : "theme-light min-h-screen"
-      }
-    >
+    <main className="theme-light min-h-screen">
+      <div className="flex min-h-screen">
+        <MerchantSidebar />
+      <div className="min-w-0 flex-1">
       {/* HEADER */}
 
       <header className="sticky top-0 z-40 border-b border-[var(--border)] bg-[var(--header)] backdrop-blur-xl">
@@ -1120,30 +1144,9 @@ export default function Home() {
 
           {/* THEME */}
 
-          <button
-            onClick={() =>
-              setDarkMode(
-                !darkMode,
-              )
-            }
-            className="flex h-9 w-9 items-center justify-center rounded-xl border border-[var(--border)] bg-[var(--surface)] transition hover:scale-105"
-          >
-            {darkMode
-              ? "☀️"
-              : "🌙"}
-          </button>
+          
         </div>
       </header>
-
-      <MerchantDashboard
-        darkMode={darkMode}
-        onOpenAgent={() => setAgentOpen(true)}
-        onViewOrders={() => {
-          setAgentOpen(true);
-          setMessage("Show my orders");
-          setTimeout(() => sendAgentMessage("Show my orders"), 100);
-        }}
-      />
 
 
       {/* CATEGORY BAR */}
@@ -1332,6 +1335,28 @@ export default function Home() {
           )}
         </section>
       </div>
+
+      <section className="mx-auto max-w-7xl px-4 pt-6 sm:px-6">
+        <div className="relative overflow-hidden rounded-3xl border border-[var(--border)] bg-[var(--surface)] p-6 shadow-sm sm:p-8">
+          <div className="relative z-10 max-w-2xl">
+            <div className="mb-3 inline-flex items-center gap-2 rounded-full bg-[var(--sage)] px-3 py-1 text-xs font-bold text-[var(--primary)]">
+              ✦ AI Commerce Dashboard
+            </div>
+
+            <h2 className="text-2xl font-extrabold tracking-tight sm:text-4xl">
+              Grow your store with{" "}
+              <span className="text-[var(--primary)]">AI</span>
+            </h2>
+
+            <p className="mt-3 max-w-xl text-sm leading-6 text-[var(--muted)] sm:text-base">
+              Track your store performance and manage AI-powered shopping from
+              one simple workspace.
+            </p>
+          </div>
+
+          <div className="pointer-events-none absolute -right-12 -top-16 hidden h-64 w-64 rounded-full bg-[var(--sage)] opacity-60 blur-2xl sm:block" />
+        </div>
+      </section>
 
       {/* FLOATING AGENT */}
 
@@ -1901,6 +1926,8 @@ export default function Home() {
           </aside>
         </div>
       )}
+       </div>
+  </div>
     </main>
   );
 }

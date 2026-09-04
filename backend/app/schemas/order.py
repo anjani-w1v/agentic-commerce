@@ -24,6 +24,7 @@ class OrderResponse(BaseModel):
     id: int
     session_id: str
     status: str
+    payment_status: str
     subtotal: Decimal
     currency: str
 

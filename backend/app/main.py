@@ -8,6 +8,7 @@ from app.api.payments import router as payments_router
 from fastapi.middleware.cors import CORSMiddleware
 from app.api.agent import router as agent_router
 from app.api.audit import router as audit_router
+from app.api.campaigns import router as campaigns_router
 
 
 app = FastAPI(
@@ -30,6 +31,7 @@ app.include_router(address_router)
 app.include_router(orders_router)
 app.include_router(payments_router)
 app.include_router(audit_router)
+app.include_router(campaigns_router)
 app.include_router(agent_router)
 
 

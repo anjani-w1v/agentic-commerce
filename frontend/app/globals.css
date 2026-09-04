@@ -48,42 +48,44 @@
 /* ================================================= */
 
 .theme-dark {
-  --background: #092328;
 
-  --text: #f1f8f3;
+  --background: #1c1816;
 
-  --deep: #092328;
+  --text: #CAAA98;
 
-  --surface: #102f32;
+  --deep: #171311;
 
-  --header: rgba(9, 35, 40, 0.96);
+  --surface: #28211e;
 
-  --border: #24504d;
+  --header: rgba(28, 24, 22, 0.96);
 
-  --primary: #2A835F;
+  --border: #51453e;
 
-  --primary-dark: #12544F;
+  --primary: #9A8678;
 
-  --mint: #8BBB92;
+  --primary-dark: #756357;
 
-  --muted: #a8c1b4;
+  --mint: #CAAA98;
 
-  --hover: #173b3d;
+  --muted: #aa9689;
 
-  --search-bg: #0d292e;
+  --hover: #352b27;
 
-  --product-bg: #153a3b;
+  --search-bg: #241d1a;
 
-  --agent-bg: #123436;
+  --product-bg: #302722;
 
-  --agent-border: #285a52;
+  --agent-bg: #2b231f;
+
+  --agent-border: #5b4b42;
 
   --hero: linear-gradient(
     135deg,
-    #092328 0%,
-    #12544F 60%,
-    #2A835F 100%
+    #1c1816 0%,
+    #352b27 60%,
+    #9A8678 100%
   );
+
 }
 
 /* ================================================= */
